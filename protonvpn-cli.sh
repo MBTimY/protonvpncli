@@ -554,6 +554,7 @@ function openvpn_connect() {
     done
 
     echo "[!] Error connecting to VPN."
+    echo "$config_id" >> "$(get_protonvpn_cli_home)/.error_connection_config_id"
     if grep -q "AUTH_FAILED" "$connection_logs"; then
       echo "[!] Reason: Authentication failed. Please check your ProtonVPN OpenVPN credentials."
     fi
@@ -794,9 +795,21 @@ function connect_to_fastest_vpn() {
   check_if_internet_is_working_normally
 
   echo "Fetching ProtonVPN servers..."
-  config_id=$(get_fastest_vpn_connection_id)
-  selected_protocol="udp"
-  openvpn_connect "$config_id" "$selected_protocol"
+  local config_id=$(get_fastest_vpn_connection_id)
+
+  local selected_protocol="udp"
+  {
+    openvpn_connect "$config_id" "$selected_protocol"
+  } &
+  local openvpn_pid=$!
+  
+  wait $openvpn_pid
+  local exit_status=$?
+  if (( $exit_status != 0 )); then
+    connect_to_fastest_vpn
+  else
+    exit $exit_status
+  fi
 }
 
 function connect_to_fastest_p2p_vpn() {
@@ -1377,13 +1390,14 @@ function get_fastest_vpn_connection_id() {
                          --header 'Accept: application/vnd.protonmail.v1+json' \
                          -o /dev/null \
                          --timeout 20 --tries 1 -q -O - "https://api.protonmail.ch/vpn/logicals" | tee "$(get_protonvpn_cli_home)/.response_cache")
+
   if [[ $? != 0 ]]; then
     return
   fi
-
   tier=$(< "$(get_protonvpn_cli_home)/protonvpn_tier")
+
   output=`$python <<END
-import json, math, random
+import json, math, random, os
 json_parsed_response = json.loads("""$response_output""")
 
 all_features = {"SECURE_CORE": 1, "TOR": 2, "P2P": 4, "XOR": 8, "IPV6": 16}
@@ -1391,6 +1405,11 @@ excluded_features_on_fastest_connect = ["TOR"]
 required_features = ["$required_feature"] if "$required_feature" in all_features else []
 if "TOR" in required_features:
     excluded_features_on_fastest_connect.remove("TOR")
+
+error_connection_id = []
+if (os.path.exists("""$(get_protonvpn_cli_home)/.error_connection_config_id""")):
+    with open("""$(get_protonvpn_cli_home)/.error_connection_config_id""", "r+") as f:
+        error_connection_id = f.readlines()
 
 candidates_1 = []
 for _ in json_parsed_response["LogicalServers"]:
@@ -1407,6 +1426,10 @@ for _ in json_parsed_response["LogicalServers"]:
             is_excluded = True
     for required_feature in required_features:
         if required_feature not in server_features:
+            is_excluded = True
+    for error_id in error_connection_id:
+        if _["ID"].startswith(error_id.strip()):
+            # print("[DEBUG] error_id is: ", error_id)
             is_excluded = True
     if is_excluded is True:
         continue
@@ -1525,11 +1548,16 @@ function help_message() {
     echo "   --update                            Update protonvpn-cli."
     echo "   --install                           Install protonvpn-cli."
     echo "   --uninstall                         Uninstall protonvpn-cli."
+    echo "   --clear                             Clear error-connection cache log"
     echo "   -v, --version                       Display version."
     echo "   -h, --help                          Show this help message."
     echo
 
     exit 0
+}
+
+function clear_errorid() {
+    rm -f "$(get_protonvpn_cli_home)/.error_connection_config_id"
 }
 
 check_requirements
@@ -1582,6 +1610,8 @@ case $user_input in
   "-install"|"--install") install_cli
     ;;
   "-uninstall"|"--uninstall") uninstall_cli
+    ;;
+  "-clear" | "-clearErrorId") clear_errorid
     ;;
   *)
     echo "[!] Invalid input: $user_input"
