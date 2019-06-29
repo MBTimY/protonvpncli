@@ -11,6 +11,7 @@ version=1.1.2
 
 if [[ ("$UID" != 0) && ("$1" != "ip") && ("$1" != "-ip") && \
       ("$1" != "--ip") && ! (-z "$1") && ("$1" != "-h") && \
+      ("$1" != "--status") && ("$1" != "-status") && ("$1" != "status") && \
       ("$1" != "--help") && ("$1" != "--h") && ("$1" != "-help") && \
       ("$1" != "help") && ("$1" != "--version") && ("$1" != "-version") && \
       ("$1" != "-v") && ("$1" != "--v")]]; then
@@ -24,11 +25,11 @@ function check_requirements() {
     exit 1
   fi
 
-  if [[ ! -z $(which python) ]]; then
+  if [[ -n $(which python) ]]; then
     python=$(which python)
-  elif [[ ! -z $(which python3) ]]; then
+  elif [[ -n $(which python3) ]]; then
     python=$(which python3)
-  elif [[ ! -z $(which python2) ]]; then
+  elif [[ -n $(which python2) ]]; then
     python=$(which python2)
   fi
 
@@ -89,9 +90,9 @@ function get_home() {
 }
 
 function sha512sum_func() {
-  if [[ ! -z $(which sha512sum) ]]; then
+  if [[ -n $(which sha512sum) ]]; then
     sha512sum_tool="$(which sha512sum)"
-  elif [[ ! -z $(which shasum) ]]; then
+  elif [[ -n $(which shasum) ]]; then
     sha512sum_tool="$(which shasum) -a 512 "
   fi
   export sha512sum_tool
@@ -243,7 +244,7 @@ function manage_ipv6() {
   # ProtonVPN support for IPv6 coming soon.
   errors_counter=0
   if [[ ("$1" == "disable") && ( $(detect_platform_type) != "macos" ) ]]; then
-    if [ ! -z "$(ip -6 a 2> /dev/null)" ]; then
+    if [ -n "$(ip -6 a 2> /dev/null)" ]; then
 
       # Save linklocal address and disable IPv6.
       ip -6 a | awk '/^[0-9]/ {DEV=$2}/inet6 fe80/ {print substr(DEV,1,length(DEV)-1) " " $2}' > "$(get_protonvpn_cli_home)/.ipv6_address"
@@ -278,7 +279,7 @@ function manage_ipv6() {
     done
 
   fi
-
+  
   if [[ ("$1" == "enable") && ( ! -f "$(get_protonvpn_cli_home)/.ipv6_address" ) && ( $(detect_platform_type) != "macos" ) ]]; then
     echo "[!] This is an error in enabling IPv6 on the machine. Please enable it manually."
   fi
@@ -484,6 +485,7 @@ function openvpn_connect() {
   # killswitch backup_rules # Backing-up firewall rules.
 
   config_id=$1
+  # echo "1111 - $config_id"
   selected_protocol=$2
   if [[ -z "$selected_protocol" ]]; then
     selected_protocol="udp"  # Default protocol
@@ -529,7 +531,7 @@ function openvpn_connect() {
     max_checks=3
     counter=0
     while [[ $counter -lt $max_checks ]]; do
-      sleep 6
+      sleep 4
       new_ip="$(check_ip)"
       if [[ ("$current_ip" != "$new_ip") && ("$new_ip" != "Error.") ]]; then
         echo "[$] Connected!"
@@ -555,6 +557,7 @@ function openvpn_connect() {
 
     echo "[!] Error connecting to VPN."
     echo "$config_id" >> "$(get_protonvpn_cli_home)/.error_connection_config_id"
+
     if grep -q "AUTH_FAILED" "$connection_logs"; then
       echo "[!] Reason: Authentication failed. Please check your ProtonVPN OpenVPN credentials."
     fi
@@ -650,7 +653,7 @@ function install_cli() {
   chmod 0755 "/usr/local/bin/protonvpn-cli" "/usr/local/bin/pvpn" "/usr/bin/protonvpn-cli" "/usr/bin/pvpn" &> /dev/null
   if [[ $? != 0 ]]; then errors_counter=$((errors_counter+1)); fi
 
-  if [[ ($errors_counter == 0) || ( ! -z $(which protonvpn-cli) ) ]]; then
+  if [[ ($errors_counter == 0) || ( -n $(which protonvpn-cli) ) ]]; then
     echo "[*] Done."
     exit 0
   else
@@ -794,10 +797,10 @@ function connect_to_fastest_vpn() {
   check_if_openvpn_is_currently_running
   check_if_internet_is_working_normally
 
-  echo "Fetching ProtonVPN servers..."
   local config_id=$(get_fastest_vpn_connection_id)
-
+  
   local selected_protocol="udp"
+
   {
     openvpn_connect "$config_id" "$selected_protocol"
   } &
@@ -1385,11 +1388,28 @@ END`
 
 function get_fastest_vpn_connection_id() {
   required_feature=${1:-}
+
+  delta=61*30
+  if [[ -f "$(get_protonvpn_cli_home)/.last_update_time" ]]; then
+    last_timestamp=$(cat "$(get_protonvpn_cli_home)/.last_update_time")
+    local now_timestamp=$(date +%s)
+    delta=$now_timestamp-$last_timestamp
+  else
+    last_timestamp=$(date +%s | tee "$(get_protonvpn_cli_home)/.last_update_time")
+  fi
+
+  if [[ $delta > 60*30 ]]; then
+  # echo "Fetching ProtonVPN servers..."
   response_output=$(wget --header 'x-pm-appversion: Other' \
                          --header 'x-pm-apiversion: 3' \
                          --header 'Accept: application/vnd.protonmail.v1+json' \
                          -o /dev/null \
-                         --timeout 20 --tries 1 -q -O - "https://api.protonmail.ch/vpn/logicals" | tee "$(get_protonvpn_cli_home)/.response_cache")
+                         --timeout 2000 --tries 3 -q -O - "https://api.protonmail.ch/vpn/logicals" | tee "$(get_protonvpn_cli_home)/.response_cache")
+  (echo "${now_timestamp}" | tee "$(get_protonvpn_cli_home)/.last_update_time")
+  else
+  # echo "Fetching ProtonVPN servers from cache..."
+  response_output=$(cat "$(get_protonvpn_cli_home)/.response_cache")
+  fi
 
   if [[ $? != 0 ]]; then
     return
@@ -1397,7 +1417,7 @@ function get_fastest_vpn_connection_id() {
   tier=$(< "$(get_protonvpn_cli_home)/protonvpn_tier")
 
   output=`$python <<END
-import json, math, random, os
+import json, math, random, os, re
 json_parsed_response = json.loads("""$response_output""")
 
 all_features = {"SECURE_CORE": 1, "TOR": 2, "P2P": 4, "XOR": 8, "IPV6": 16}
@@ -1428,7 +1448,7 @@ for _ in json_parsed_response["LogicalServers"]:
         if required_feature not in server_features:
             is_excluded = True
     for error_id in error_connection_id:
-        if _["ID"].startswith(error_id.strip()):
+        if re.search(r"^\S", error_id) and _["ID"].startswith(error_id.strip()):
             # print("[DEBUG] error_id is: ", error_id)
             is_excluded = True
     if is_excluded is True:
@@ -1441,7 +1461,6 @@ candidates_2 = sorted(candidates_1, key=lambda l: l["Score"])[:int(math.ceil(can
 random_candidate = random.choice(candidates_2)
 vpn_connection_id = random_candidate["ID"]
 print(vpn_connection_id)
-
 END`
 
   echo "$output"
